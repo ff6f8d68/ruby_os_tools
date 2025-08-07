@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>SVG to Filled Scratch Path Converter</title>
+  <title>SVG to Density-Varied Scratch Path</title>
   <style>
     body { font-family: sans-serif; padding: 2em; background: #f4f4f4; }
     input, button { margin: 10px 0; padding: 8px; }
@@ -11,7 +11,7 @@
 </head>
 <body>
 
-<h2>SVG to Filled Scratch Path Converter</h2>
+<h2>SVG to Density-Varied Scratch Path Converter</h2>
 <input type="file" id="fileInput" accept=".svg" /><br />
 <button onclick="processSVG()">Convert and Download</button>
 
@@ -22,6 +22,10 @@ const SCRATCH_WIDTH = 480;
 const SCRATCH_HEIGHT = 360;
 const CANVAS_WIDTH = 480;
 const CANVAS_HEIGHT = 360;
+
+// Row spacing range (in pixels). Smaller means denser lines.
+const MIN_ROW_SPACING = 2;
+const MAX_ROW_SPACING = 10;
 
 function processSVG() {
   const fileInput = document.getElementById("fileInput");
@@ -34,7 +38,7 @@ function processSVG() {
 
   const reader = new FileReader();
   reader.onload = function (e) {
-    // Create an image from the SVG text data
+    // Create image from SVG text data
     const svgBlob = new Blob([e.target.result], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(svgBlob);
     const img = new Image();
@@ -42,28 +46,32 @@ function processSVG() {
     img.onload = function() {
       URL.revokeObjectURL(url);
 
-      // Create offscreen canvas to rasterize SVG
+      // Draw SVG on canvas
       const canvas = document.createElement('canvas');
       canvas.width = CANVAS_WIDTH;
       canvas.height = CANVAS_HEIGHT;
       const ctx = canvas.getContext('2d');
 
-      // Clear white background (important)
+      // White background
       ctx.fillStyle = 'white';
       ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-      // Draw SVG image scaled to fit canvas exactly
       ctx.drawImage(img, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-      // Scan canvas pixels and build continuous zigzag path through black/non-white pixels
-      const pathPoints = scanCanvasForPath(ctx, CANVAS_WIDTH, CANVAS_HEIGHT);
+      // Convert canvas to grayscale and threshold to BW
+      const bwData = convertToBW(ctx, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+      // Compute brightness profile for variable row spacing
+      const brightnessProfile = computeBrightnessProfile(bwData, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+      // Generate continuous zigzag path with density variation based on brightness
+      const pathPoints = generateDensityVariedPath(bwData, brightnessProfile, CANVAS_WIDTH, CANVAS_HEIGHT);
 
       if (pathPoints.length === 0) {
         alert("No filled pixels found.");
         return;
       }
 
-      // Normalize points to Scratch coords
       const [xList, yList] = normalizePoints(pathPoints);
 
       downloadList(xList, "X.txt");
@@ -82,53 +90,103 @@ function processSVG() {
   reader.readAsText(file);
 }
 
-// Scan canvas to generate continuous zigzag path over non-white pixels
-function scanCanvasForPath(ctx, width, height) {
+// Convert image to BW (black and white) using luminance threshold
+function convertToBW(ctx, width, height) {
   const imgData = ctx.getImageData(0, 0, width, height);
   const data = imgData.data;
 
-  let points = [];
-  // Threshold for "non-white" pixel (alpha >0 and not white)
-  function isFilledPixel(i) {
-    const r = data[i];
-    const g = data[i+1];
-    const b = data[i+2];
-    const a = data[i+3];
-    // Consider pixel filled if not close to white and visible
-    return a > 10 && !(r > 240 && g > 240 && b > 240);
+  for(let i = 0; i < data.length; i += 4) {
+    // Calculate luminance (0=black, 255=white)
+    const r = data[i], g = data[i+1], b = data[i+2];
+    const lum = 0.299*r + 0.587*g + 0.114*b;
+    // Threshold at 128 (middle gray)
+    const bw = lum < 128 ? 0 : 255;
+    data[i] = data[i+1] = data[i+2] = bw;
+    data[i+3] = 255; // opaque
   }
+  ctx.putImageData(imgData, 0, 0);
+  return imgData;
+}
 
-  // We'll do a horizontal zigzag scan:
-  // For each y, scan x left->right if even row, right->left if odd row
-  // Add points only for filled pixels, skipping white areas (no pen lifts!)
+// Compute average brightness per row for spacing calculation
+function computeBrightnessProfile(imgData, width, height) {
+  const data = imgData.data;
+  let profile = new Array(height).fill(0);
 
   for(let y = 0; y < height; y++) {
-    const rowPoints = [];
-    if (y % 2 === 0) {
+    let sum = 0;
+    for(let x = 0; x < width; x++) {
+      const i = (y*width + x)*4;
+      // brightness normalized 0 (black) to 1 (white)
+      const bright = data[i] / 255;
+      sum += bright;
+    }
+    profile[y] = sum / width; // average brightness of row
+  }
+  return profile;
+}
+
+// Generate a zigzag continuous path with row spacing varying by brightness
+function generateDensityVariedPath(imgData, brightnessProfile, width, height) {
+  const data = imgData.data;
+  let points = [];
+
+  // Map brightness to spacing: darker (brightness ~0) = min spacing, lighter ~1 = max spacing
+  function brightnessToSpacing(brightness) {
+    return MIN_ROW_SPACING + brightness * (MAX_ROW_SPACING - MIN_ROW_SPACING);
+  }
+
+  let y = 0;
+  let lastX = null, lastY = null;
+
+  while (y < height) {
+    // Find nearest integer row
+    const row = Math.floor(y);
+    const spacing = brightnessToSpacing(brightnessProfile[row]);
+
+    // Get filled pixels on this row in zig or zag order depending on row index
+    let rowPoints = [];
+    if (Math.floor(y / spacing) % 2 === 0) {
       for(let x = 0; x < width; x++) {
-        const idx = (y*width + x)*4;
-        if(isFilledPixel(idx)) {
-          rowPoints.push([x, y]);
+        const idx = (row*width + x)*4;
+        if (data[idx] === 0) { // black pixel only
+          rowPoints.push([x, row]);
         }
       }
     } else {
       for(let x = width -1; x >= 0; x--) {
-        const idx = (y*width + x)*4;
-        if(isFilledPixel(idx)) {
-          rowPoints.push([x, y]);
+        const idx = (row*width + x)*4;
+        if (data[idx] === 0) {
+          rowPoints.push([x, row]);
         }
       }
     }
 
-    if(rowPoints.length === 0) {
-      // No filled pixels on this row, but we still must connect continuous path
-      // So if last point exists, add a direct linear interpolation to next filled pixel in next row
-      // (Or skip if next row also empty)
-      continue; // Just skip empty rows (no pen lift allowed, but no points either)
+    if (rowPoints.length === 0) {
+      // No black pixels in this row: 
+      // Optionally add interpolation point to connect to next filled point to avoid pen lift
+      // For simplicity, skip empty rows for now
+    } else {
+      // Connect from last point to first point on this row by linear interpolation (to avoid pen lifts)
+      if (lastX !== null && lastY !== null) {
+        // Interpolate line between last point and first new point
+        const [firstX, firstY] = rowPoints[0];
+        const dist = Math.hypot(firstX - lastX, firstY - lastY);
+        const steps = Math.floor(dist);
+        for(let i=1; i<=steps; i++) {
+          const interpX = lastX + (firstX - lastX) * i / steps;
+          const interpY = lastY + (firstY - lastY) * i / steps;
+          points.push([interpX, interpY]);
+        }
+      }
+      points.push(...rowPoints);
+      // Update last point
+      const lastPt = rowPoints[rowPoints.length -1];
+      lastX = lastPt[0];
+      lastY = lastPt[1];
     }
 
-    // Add this row's points to main path
-    points.push(...rowPoints);
+    y += spacing;
   }
 
   return points;
@@ -163,7 +221,7 @@ function normalizePoints(points) {
   return [xList, yList];
 }
 
-// Download a list as a newline-separated text file
+// Download a list as newline-separated text file
 function downloadList(list, filename) {
   const blob = new Blob([list.join('\n')], { type: 'text/plain' });
   const link = document.createElement("a");
@@ -171,6 +229,7 @@ function downloadList(list, filename) {
   link.download = filename;
   link.click();
 }
+
 </script>
 
 </body>
