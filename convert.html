@@ -2,16 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>SVG to Scratch Path Converter</title>
+  <title>SVG to Filled Scratch Path Converter</title>
   <style>
     body { font-family: sans-serif; padding: 2em; background: #f4f4f4; }
     input, button { margin: 10px 0; padding: 8px; }
-    #output { margin-top: 20px; }
+    #output { margin-top: 20px; white-space: pre-wrap; }
   </style>
 </head>
 <body>
 
-<h2>SVG to Scratch Path Converter</h2>
+<h2>SVG to Filled Scratch Path Converter</h2>
 <input type="file" id="fileInput" accept=".svg" /><br />
 <button onclick="processSVG()">Convert and Download</button>
 
@@ -20,6 +20,8 @@
 <script>
 const SCRATCH_WIDTH = 480;
 const SCRATCH_HEIGHT = 360;
+const CANVAS_WIDTH = 480;
+const CANVAS_HEIGHT = 360;
 
 function processSVG() {
   const fileInput = document.getElementById("fileInput");
@@ -32,115 +34,103 @@ function processSVG() {
 
   const reader = new FileReader();
   reader.onload = function (e) {
-    const parser = new DOMParser();
-    const svgDoc = parser.parseFromString(e.target.result, "image/svg+xml");
-    const svg = svgDoc.querySelector("svg");
+    // Create an image from the SVG text data
+    const svgBlob = new Blob([e.target.result], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(svgBlob);
+    const img = new Image();
 
-    if (!svg) {
-      alert("Invalid SVG file.");
-      return;
-    }
+    img.onload = function() {
+      URL.revokeObjectURL(url);
 
-    let segments = [];
+      // Create offscreen canvas to rasterize SVG
+      const canvas = document.createElement('canvas');
+      canvas.width = CANVAS_WIDTH;
+      canvas.height = CANVAS_HEIGHT;
+      const ctx = canvas.getContext('2d');
 
-    // Parse <path>
-    svg.querySelectorAll("path").forEach(pathElem => {
-      const pathData = pathElem.getAttribute("d");
-      try {
-        const flattened = flattenPath(pathData);
-        if (flattened.length > 0) segments.push(flattened);
-      } catch (e) {
-        console.warn("Failed to parse path:", pathData);
+      // Clear white background (important)
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+      // Draw SVG image scaled to fit canvas exactly
+      ctx.drawImage(img, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+      // Scan canvas pixels and build continuous zigzag path through black/non-white pixels
+      const pathPoints = scanCanvasForPath(ctx, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+      if (pathPoints.length === 0) {
+        alert("No filled pixels found.");
+        return;
       }
-    });
 
-    // Parse <line>
-    svg.querySelectorAll("line").forEach(line => {
-      const x1 = parseFloat(line.getAttribute("x1"));
-      const y1 = parseFloat(line.getAttribute("y1"));
-      const x2 = parseFloat(line.getAttribute("x2"));
-      const y2 = parseFloat(line.getAttribute("y2"));
-      segments.push([[x1, y1], [x2, y2]]);
-    });
+      // Normalize points to Scratch coords
+      const [xList, yList] = normalizePoints(pathPoints);
 
-    // Parse <polyline> and <polygon>
-    svg.querySelectorAll("polyline, polygon").forEach(poly => {
-      const pts = poly.getAttribute("points").trim().split(/[\s,]+/);
-      let segment = [];
-      for (let i = 0; i < pts.length - 1; i += 2) {
-        segment.push([parseFloat(pts[i]), parseFloat(pts[i + 1])]);
-      }
-      if (segment.length > 0) segments.push(segment);
-    });
+      downloadList(xList, "X.txt");
+      downloadList(yList, "Y.txt");
 
-    if (segments.length === 0) {
-      alert("No valid points found in SVG.");
-      return;
-    }
+      document.getElementById("output").innerText = `Done! Points: ${xList.length}`;
+    };
 
-    // Connect all segments into one continuous path with interpolated travel points
-    const continuousPoints = connectSegments(segments);
+    img.onerror = function() {
+      alert("Failed to load SVG image.");
+    };
 
-    const [xList, yList] = normalizePoints(continuousPoints);
-
-    downloadList(xList, "X.txt");
-    downloadList(yList, "Y.txt");
-
-    document.getElementById("output").innerText =
-      `Done! Points: ${xList.length}`;
+    img.src = url;
   };
 
   reader.readAsText(file);
 }
 
-// Flatten SVG path by sampling points along the path length
-function flattenPath(d, samples = 100) {
-  const svgNS = "http://www.w3.org/2000/svg";
-  const tempPath = document.createElementNS(svgNS, "path");
-  tempPath.setAttribute("d", d);
+// Scan canvas to generate continuous zigzag path over non-white pixels
+function scanCanvasForPath(ctx, width, height) {
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
 
-  let length = tempPath.getTotalLength();
   let points = [];
-
-  for (let i = 0; i <= samples; i++) {
-    const pt = tempPath.getPointAtLength((i / samples) * length);
-    points.push([pt.x, pt.y]);
+  // Threshold for "non-white" pixel (alpha >0 and not white)
+  function isFilledPixel(i) {
+    const r = data[i];
+    const g = data[i+1];
+    const b = data[i+2];
+    const a = data[i+3];
+    // Consider pixel filled if not close to white and visible
+    return a > 10 && !(r > 240 && g > 240 && b > 240);
   }
 
-  return points;
-}
+  // We'll do a horizontal zigzag scan:
+  // For each y, scan x left->right if even row, right->left if odd row
+  // Add points only for filled pixels, skipping white areas (no pen lifts!)
 
-// Connect segments smoothly by inserting intermediate points so pen never lifts
-function connectSegments(segments) {
-  let connectedPoints = [];
-  if (segments.length === 0) return connectedPoints;
+  for(let y = 0; y < height; y++) {
+    const rowPoints = [];
+    if (y % 2 === 0) {
+      for(let x = 0; x < width; x++) {
+        const idx = (y*width + x)*4;
+        if(isFilledPixel(idx)) {
+          rowPoints.push([x, y]);
+        }
+      }
+    } else {
+      for(let x = width -1; x >= 0; x--) {
+        const idx = (y*width + x)*4;
+        if(isFilledPixel(idx)) {
+          rowPoints.push([x, y]);
+        }
+      }
+    }
 
-  connectedPoints.push(...segments[0]);
+    if(rowPoints.length === 0) {
+      // No filled pixels on this row, but we still must connect continuous path
+      // So if last point exists, add a direct linear interpolation to next filled pixel in next row
+      // (Or skip if next row also empty)
+      continue; // Just skip empty rows (no pen lift allowed, but no points either)
+    }
 
-  for (let i = 1; i < segments.length; i++) {
-    const lastPoint = connectedPoints[connectedPoints.length - 1];
-    const nextStart = segments[i][0];
-
-    // Insert interpolated points to connect lastPoint to nextStart
-    const travelPoints = interpolateLine(lastPoint, nextStart, 20); // 20 steps for smooth travel
-    connectedPoints.push(...travelPoints);
-
-    // Append next segment points
-    connectedPoints.push(...segments[i]);
+    // Add this row's points to main path
+    points.push(...rowPoints);
   }
 
-  return connectedPoints;
-}
-
-// Interpolates points between p1 and p2 in given number of steps (excluding p1)
-function interpolateLine(p1, p2, steps) {
-  let points = [];
-  for (let i = 1; i <= steps; i++) {
-    let t = i / steps;
-    let x = p1[0] + (p2[0] - p1[0]) * t;
-    let y = p1[1] + (p2[1] - p1[1]) * t;
-    points.push([x, y]);
-  }
   return points;
 }
 
