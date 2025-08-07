@@ -41,14 +41,14 @@ function processSVG() {
       return;
     }
 
-    let points = [];
+    let segments = [];
 
     // Parse <path>
     svg.querySelectorAll("path").forEach(pathElem => {
       const pathData = pathElem.getAttribute("d");
       try {
         const flattened = flattenPath(pathData);
-        points.push(...flattened);
+        if (flattened.length > 0) segments.push(flattened);
       } catch (e) {
         console.warn("Failed to parse path:", pathData);
       }
@@ -60,23 +60,28 @@ function processSVG() {
       const y1 = parseFloat(line.getAttribute("y1"));
       const x2 = parseFloat(line.getAttribute("x2"));
       const y2 = parseFloat(line.getAttribute("y2"));
-      points.push([x1, y1], [x2, y2]);
+      segments.push([[x1, y1], [x2, y2]]);
     });
 
     // Parse <polyline> and <polygon>
     svg.querySelectorAll("polyline, polygon").forEach(poly => {
       const pts = poly.getAttribute("points").trim().split(/[\s,]+/);
+      let segment = [];
       for (let i = 0; i < pts.length - 1; i += 2) {
-        points.push([parseFloat(pts[i]), parseFloat(pts[i + 1])]);
+        segment.push([parseFloat(pts[i]), parseFloat(pts[i + 1])]);
       }
+      if (segment.length > 0) segments.push(segment);
     });
 
-    if (points.length === 0) {
+    if (segments.length === 0) {
       alert("No valid points found in SVG.");
       return;
     }
 
-    const [xList, yList] = normalizePoints(points);
+    // Connect all segments into one continuous path with interpolated travel points
+    const continuousPoints = connectSegments(segments);
+
+    const [xList, yList] = normalizePoints(continuousPoints);
 
     downloadList(xList, "X.txt");
     downloadList(yList, "Y.txt");
@@ -88,7 +93,7 @@ function processSVG() {
   reader.readAsText(file);
 }
 
-// Flattens SVG path using a simple sampling method
+// Flatten SVG path by sampling points along the path length
 function flattenPath(d, samples = 100) {
   const svgNS = "http://www.w3.org/2000/svg";
   const tempPath = document.createElementNS(svgNS, "path");
@@ -105,7 +110,41 @@ function flattenPath(d, samples = 100) {
   return points;
 }
 
-// Scales and centers points to fit within Scratch coordinates
+// Connect segments smoothly by inserting intermediate points so pen never lifts
+function connectSegments(segments) {
+  let connectedPoints = [];
+  if (segments.length === 0) return connectedPoints;
+
+  connectedPoints.push(...segments[0]);
+
+  for (let i = 1; i < segments.length; i++) {
+    const lastPoint = connectedPoints[connectedPoints.length - 1];
+    const nextStart = segments[i][0];
+
+    // Insert interpolated points to connect lastPoint to nextStart
+    const travelPoints = interpolateLine(lastPoint, nextStart, 20); // 20 steps for smooth travel
+    connectedPoints.push(...travelPoints);
+
+    // Append next segment points
+    connectedPoints.push(...segments[i]);
+  }
+
+  return connectedPoints;
+}
+
+// Interpolates points between p1 and p2 in given number of steps (excluding p1)
+function interpolateLine(p1, p2, steps) {
+  let points = [];
+  for (let i = 1; i <= steps; i++) {
+    let t = i / steps;
+    let x = p1[0] + (p2[0] - p1[0]) * t;
+    let y = p1[1] + (p2[1] - p1[1]) * t;
+    points.push([x, y]);
+  }
+  return points;
+}
+
+// Scale and center points for Scratch coordinate system (-240 to 240, -180 to 180)
 function normalizePoints(points) {
   let xs = points.map(p => p[0]);
   let ys = points.map(p => p[1]);
@@ -113,8 +152,8 @@ function normalizePoints(points) {
   let minX = Math.min(...xs), maxX = Math.max(...xs);
   let minY = Math.min(...ys), maxY = Math.max(...ys);
 
-  let width = maxX - minX;
-  let height = maxY - minY;
+  let width = maxX - minX || 1;
+  let height = maxY - minY || 1;
 
   let scale = Math.min(SCRATCH_WIDTH / width, SCRATCH_HEIGHT / height);
 
@@ -125,9 +164,8 @@ function normalizePoints(points) {
     let yScaled = (y - minY - height / 2) * scale;
 
     let xScratch = Math.max(-240, Math.min(240, xScaled));
-    let yScratch = Math.max(-180, Math.min(180, -yScaled)); // invert Y
+    let yScratch = Math.max(-180, Math.min(180, -yScaled)); // invert Y axis
 
-    // Push simple strings without commas
     xList.push(xScratch.toFixed(2));
     yList.push(yScratch.toFixed(2));
   });
@@ -135,8 +173,7 @@ function normalizePoints(points) {
   return [xList, yList];
 }
 
-
-// Trigger download (newline-separated now)
+// Download a list as a newline-separated text file
 function downloadList(list, filename) {
   const blob = new Blob([list.join('\n')], { type: 'text/plain' });
   const link = document.createElement("a");
@@ -144,7 +181,6 @@ function downloadList(list, filename) {
   link.download = filename;
   link.click();
 }
-
 </script>
 
 </body>
