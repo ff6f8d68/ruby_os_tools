@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SVG to Scratch Path Converter</title>
+  <style>
+    body { font-family: sans-serif; padding: 2em; background: #f4f4f4; }
+    input, button { margin: 10px 0; padding: 8px; }
+    #output { margin-top: 20px; }
+  </style>
+</head>
+<body>
+
+<h2>SVG to Scratch Path Converter</h2>
+<input type="file" id="fileInput" accept=".svg"><br>
+<button onclick="processSVG()">Convert and Download</button>
+
+<div id="output"></div>
+
+<script>
+const SCRATCH_WIDTH = 480;
+const SCRATCH_HEIGHT = 360;
+
+function processSVG() {
+  const fileInput = document.getElementById("fileInput");
+  const file = fileInput.files[0];
+
+  if (!file) {
+    alert("Please select an SVG file.");
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = function (e) {
+    const parser = new DOMParser();
+    const svgDoc = parser.parseFromString(e.target.result, "image/svg+xml");
+    const svg = svgDoc.querySelector("svg");
+
+    if (!svg) {
+      alert("Invalid SVG file.");
+      return;
+    }
+
+    let points = [];
+
+    // Parse <path>
+    svg.querySelectorAll("path").forEach(pathElem => {
+      const pathData = pathElem.getAttribute("d");
+      try {
+        const path = new Path2D(pathData);
+        const flattened = flattenPath(pathData);
+        points.push(...flattened);
+      } catch (e) {
+        console.warn("Failed to parse path:", pathData);
+      }
+    });
+
+    // Parse <line>
+    svg.querySelectorAll("line").forEach(line => {
+      const x1 = parseFloat(line.getAttribute("x1"));
+      const y1 = parseFloat(line.getAttribute("y1"));
+      const x2 = parseFloat(line.getAttribute("x2"));
+      const y2 = parseFloat(line.getAttribute("y2"));
+      points.push([x1, y1], [x2, y2]);
+    });
+
+    // Parse <polyline> and <polygon>
+    svg.querySelectorAll("polyline, polygon").forEach(poly => {
+      const pts = poly.getAttribute("points").trim().split(/[\s,]+/);
+      for (let i = 0; i < pts.length - 1; i += 2) {
+        points.push([parseFloat(pts[i]), parseFloat(pts[i + 1])]);
+      }
+    });
+
+    if (points.length === 0) {
+      alert("No valid points found in SVG.");
+      return;
+    }
+
+    const [xList, yList] = normalizePoints(points);
+
+    downloadList(xList, "X.txt");
+    downloadList(yList, "Y.txt");
+
+    document.getElementById("output").innerText =
+      `Done! Points: ${xList.length}`;
+  };
+
+  reader.readAsText(file);
+}
+
+// Flattens SVG path using a simple sampling method
+function flattenPath(d, samples = 100) {
+  const svgNS = "http://www.w3.org/2000/svg";
+  const tempPath = document.createElementNS(svgNS, "path");
+  tempPath.setAttribute("d", d);
+
+  let length = tempPath.getTotalLength();
+  let points = [];
+
+  for (let i = 0; i <= samples; i++) {
+    const pt = tempPath.getPointAtLength((i / samples) * length);
+    points.push([pt.x, pt.y]);
+  }
+
+  return points;
+}
+
+// Scales and centers points to fit within Scratch coordinates
+function normalizePoints(points) {
+  let xs = points.map(p => p[0]);
+  let ys = points.map(p => p[1]);
+
+  let minX = Math.min(...xs), maxX = Math.max(...xs);
+  let minY = Math.min(...ys), maxY = Math.max(...ys);
+
+  let width = maxX - minX;
+  let height = maxY - minY;
+
+  let scale = Math.min(SCRATCH_WIDTH / width, SCRATCH_HEIGHT / height);
+
+  let xList = [], yList = [];
+
+  points.forEach(([x, y]) => {
+    let xScaled = (x - minX - width / 2) * scale;
+    let yScaled = (y - minY - height / 2) * scale;
+
+    let xScratch = Math.max(-240, Math.min(240, xScaled));
+    let yScratch = Math.max(-180, Math.min(180, -yScaled)); // Invert Y
+
+    xList.push(xScratch.toFixed(2));
+    yList.push(yScratch.toFixed(2));
+  });
+
+  return [xList, yList];
+}
+
+// Trigger download
+function downloadList(list, filename) {
+  const blob = new Blob([list.join(',')], { type: 'text/plain' });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+}
+</script>
+
+</body>
+</html>
