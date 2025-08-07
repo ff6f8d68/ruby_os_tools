@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <title>SVG to Scratch Path Converter</title>
   <style>
     body { font-family: sans-serif; padding: 2em; background: #f4f4f4; }
@@ -12,7 +12,7 @@
 <body>
 
 <h2>SVG to Scratch Path Converter</h2>
-<input type="file" id="fileInput" accept=".svg"><br>
+<input type="file" id="fileInput" accept=".svg" /><br />
 <button onclick="processSVG()">Convert and Download</button>
 
 <div id="output"></div>
@@ -47,7 +47,6 @@ function processSVG() {
     svg.querySelectorAll("path").forEach(pathElem => {
       const pathData = pathElem.getAttribute("d");
       try {
-        const path = new Path2D(pathData);
         const flattened = flattenPath(pathData);
         points.push(...flattened);
       } catch (e) {
@@ -135,9 +134,9 @@ function normalizePoints(points) {
   return [xList, yList];
 }
 
-// Trigger download
+// Trigger download (newline-separated now)
 function downloadList(list, filename) {
-  const blob = new Blob([list.join(',')], { type: 'text/plain' });
+  const blob = new Blob([list.join('\n')], { type: 'text/plain' });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
   link.download = filename;
