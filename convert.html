@@ -125,14 +125,16 @@ function normalizePoints(points) {
     let yScaled = (y - minY - height / 2) * scale;
 
     let xScratch = Math.max(-240, Math.min(240, xScaled));
-    let yScratch = Math.max(-180, Math.min(180, -yScaled)); // Invert Y
+    let yScratch = Math.max(-180, Math.min(180, -yScaled)); // invert Y
 
+    // Push simple strings without commas
     xList.push(xScratch.toFixed(2));
     yList.push(yScratch.toFixed(2));
   });
 
   return [xList, yList];
 }
+
 
 // Trigger download (newline-separated now)
 function downloadList(list, filename) {
